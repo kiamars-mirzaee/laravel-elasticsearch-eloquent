@@ -1,0 +1,48 @@
+{
+    "name": "kiamars-mirzaee/laravel-elasticsearch-eloquent",
+    "description": "An elegant Eloquent-style query builder for Elasticsearch in Laravel",
+    "type": "library",
+    "keywords": [
+        "laravel",
+        "elasticsearch",
+        "eloquent",
+        "search",
+        "query-builder"
+    ],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Kiamars Mirzaee",
+            "email": "kiamars.mirzaee@gmail.com"
+        }
+    ],
+    "require": {
+        "php": "^8.1",
+        "illuminate/support": "^11.0|^12.0",
+        "illuminate/database": "^11.0|^12.0",
+        "elasticsearch/elasticsearch": "^8.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^8.0|^9.0",
+        "phpunit/phpunit": "^10.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "ElasticsearchEloquent\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "ElasticsearchEloquent\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "ElasticsearchEloquent\\ElasticsearchServiceProvider"
+            ]
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}
