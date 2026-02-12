@@ -1,6 +1,6 @@
 <?php
 
-namespace ElasticsearchEloquent;
+namespace App\ApiService\Lib\ToSearchable\Elastic\ElasticsearchEloquent;
 
 use Elastic\Elasticsearch\Client;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
@@ -24,6 +24,10 @@ class ElasticsearchQueryBuilder
     protected array $filter = [];
     protected array $mustNot = [];
     protected array $sort = [];
+
+    protected array $suggest = [];
+
+
     protected array $aggregations = [];
     protected ?int $size = null;
     protected int $from = 0;
@@ -488,12 +492,13 @@ class ElasticsearchQueryBuilder
             $body['collapse'] = $this->collapse;
         }
 
+        if (!empty($this->suggest)) {
+            $body['suggest'] = $this->suggest;
+        }
+
         return $body;
     }
 
-    /**
-     * Execute the query and get results
-     */
     public function get(): Collection
     {
         $response = $this->client->search([
@@ -516,18 +521,14 @@ class ElasticsearchQueryBuilder
         });
     }
 
-    /**
-     * Get first result
-     */
+
     public function first(): ?array
     {
         $results = $this->limit(1)->get();
         return $results->first();
     }
 
-    /**
-     * Get count
-     */
+
     public function count(): int
     {
         $response = $this->client->count([
@@ -570,9 +571,7 @@ class ElasticsearchQueryBuilder
         ]);
     }
 
-    /**
-     * Get aggregations
-     */
+
     public function getAggregations(): array
     {
         $response = $this->client->search([
@@ -583,17 +582,12 @@ class ElasticsearchQueryBuilder
         return $response['aggregations'] ?? [];
     }
 
-    /**
-     * Debug - get the raw query
-     */
     public function toArray(): array
     {
         return $this->buildQuery();
     }
 
-    /**
-     * Debug - get query as JSON
-     */
+
     public function toJson(): string
     {
         return json_encode($this->buildQuery(), JSON_PRETTY_PRINT);
@@ -1145,9 +1139,7 @@ class ElasticsearchQueryBuilder
         return $this->aggregate($name, $aggregation);
     }
 
-    /**
-     * Top hits aggregation (get top documents per bucket)
-     */
+
     public function aggregateTopHits(string $name, int $size = 1, array $options = []): self
     {
         return $this->aggregate($name, [
@@ -1214,4 +1206,143 @@ class ElasticsearchQueryBuilder
 
         return $this->aggregate($name, $aggregation);
     }
+
+    public function suggestTerm(
+        string $name,
+        string $text,
+        string $field,
+        array $options = []
+    ): self {
+        $this->suggest[$name] = [
+            'text' => $text,
+            'term' => array_merge([
+                'field' => $field,
+            ], $options)
+        ];
+
+        return $this;
+    }
+
+    public function suggestPhrase(
+        string $name,
+        string $text,
+        string $field,
+        array $options = []
+    ): self {
+        $this->suggest[$name] = [
+            'text' => $text,
+            'phrase' => array_merge([
+                'field' => $field,
+            ], $options)
+        ];
+
+        return $this;
+    }
+
+    /**
+     * Completion suggester (autocomplete)
+     */
+    public function suggestCompletion(
+        string $name,
+        string $prefix,
+        string $field,
+        array $options = []
+    ): self {
+        $this->suggest[$name] = [
+            'prefix' => $prefix,
+            'completion' => array_merge([
+                'field' => $field,
+            ], $options)
+        ];
+
+        return $this;
+    }
+
+
+    /**
+     * Add raw suggest configuration
+     */
+    public function suggestRaw(array $suggest): self
+    {
+        $this->suggest = array_merge($this->suggest, $suggest);
+        return $this;
+    }
+
+    /**
+     * Execute suggest query
+     */
+    public function getSuggestions(): array
+    {
+        $response = $this->client->search([
+            'index' => $this->index,
+            'body' => $this->buildQuery()
+        ]);
+
+        return $response['suggest'] ?? [];
+    }
+
+    public function getSuggestionTexts(): array
+    {
+        $suggestions = $this->getSuggestions();
+
+        $results = [];
+
+        foreach ($suggestions as $group) {
+            foreach ($group as $entry) {
+                foreach ($entry['options'] ?? [] as $option) {
+                    $results[] = $option['text'];
+                }
+            }
+        }
+
+        return array_unique($results);
+    }
+
+
+    /**
+     * Fuzzy match query
+     */
+    public function fuzzyMatch(
+        string $field,
+        string $query,
+        array $options = []
+    ): self {
+        $this->must[] = [
+            'match' => [
+                $field => array_merge([
+                    'query' => $query,
+                    'fuzziness' => 'AUTO',
+                ], $options)
+            ]
+        ];
+
+        return $this;
+    }
+
+
+    //This searches AND returns autocomplete suggestions in one request.
+    public function hybridSearch(
+        string $searchTerm,
+        array $searchFields,
+        string $completionField
+    ): array {
+
+        $this->multiMatch($searchFields, $searchTerm, [
+            'fuzziness' => 'AUTO'
+        ]);
+
+        $this->suggestCompletion(
+            'autocomplete',
+            $searchTerm,
+            $completionField,
+            ['size' => 5]
+        );
+
+        return [
+            'results' => $this->get(),
+            'suggestions' => $this->getSuggestionTexts()
+        ];
+    }
+
+
 }

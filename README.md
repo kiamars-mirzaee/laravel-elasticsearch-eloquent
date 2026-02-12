@@ -790,6 +790,35 @@ $results = StoreProduct::search()
     ->paginate(20);
 
 ```
+
+```php
+$results = ElasticsearchQueryBuilder::new($client, 'products')
+    ->fuzzyMatch('name', 'iphnoe')
+    ->get();
+```
+
+### 🔥 Hybrid Search + Completion (Amazon Style)
+
+Now you get:
+
+Relevant results
+
+Autocomplete suggestions
+
+Same API call 🔥
+
+```php
+
+$response = ElasticsearchQueryBuilder::new($client, 'products')
+    ->hybridSearch(
+        'iph',
+        ['name^3', 'description'],
+        'name_suggest'
+    );
+
+
+```
+
 ### 1. Create Your Model
 
 ```php
@@ -2210,6 +2239,102 @@ if ($product->exists) {
 }
 ```
 
+# Suggest
+
+## Term Suggest (Spelling Fix Per Word)
+Corrects each word individually.
+```php
+$suggestions = ElasticsearchQueryBuilder::new($client, 'products')
+    ->suggestTerm(
+        'product_suggest',
+        'iphnoe',
+        'name.normalized',
+        [
+            'suggest_mode' => 'popular',
+            'min_word_length' => 3,
+            'prefix_length' => 1,
+            'max_edits' => 2,
+        ]
+    )
+    ->getSuggestionTexts();
+
+
+```
+##  Phrase Suggest (Did You Mean?)
+Corrects whole phrase contextually.
+```php
+
+$suggestions = ElasticsearchQueryBuilder::new($client, 'products')
+    ->suggestPhrase(
+        'phrase_suggest',
+        'iphnoe 14 proo',
+        'name.trigram',
+        [
+            'size' => 1,
+            'gram_size' => 3,
+            'direct_generator' => [
+                [
+                    'field' => 'name.trigram',
+                    'suggest_mode' => 'always'
+                ]
+            ],
+            'highlight' => [
+                'pre_tag' => '<em>',
+                'post_tag' => '</em>'
+            ]
+        ]
+    )
+    ->getSuggestionTexts();
+
+```
+
+### Completion Suggest (Autocomplete)
+⚠ Field must be mapped as:
+```php
+"name_suggest": {
+  "type": "completion"
+}
+
+```
+Usage:
+```php
+$suggestions = ElasticsearchQueryBuilder::new($client, 'products')
+    ->suggestCompletion(
+        'autocomplete',
+        'iph',
+        'name_suggest',
+        [
+            'size' => 5,
+            'skip_duplicates' => true
+        ]
+    )
+    ->getSuggestionTexts();
+```
+Example result:
+```php
+[
+   "iphone 13",
+   "iphone 14",
+   "iphone 14 pro"
+]
+
+```
+### Advanced Example: Search + Suggest Together
+````php
+$query = ElasticsearchQueryBuilder::new($client, 'products')
+    ->search('name', 'iphnoe')
+    ->suggestPhrase(
+        'did_you_mean',
+        'iphnoe',
+        'name.trigram'
+    );
+
+$results = $query->get();
+$suggestions = $query->getSuggestionTexts();
+
+````
+
+
 ## Type Casting
 
 ```php
@@ -2225,6 +2350,8 @@ class Product extends Model
     ];
 }
 ```
+
+
 
 ## Performance Tips
 
