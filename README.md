@@ -1685,8 +1685,454 @@ Product::inStock()
     ->get();
 ```
 
-## Complex Examples
 
+## Aggregation Methods
+
+#### Simple Sum
+```php
+<?php
+
+use App\Models\StoreProduct;
+
+// Calculate total sales amount
+$result = StoreProduct::search()
+    ->where('store_id', 1)
+    ->where('state', 'published')
+    ->aggregateSum('total_revenue', 'price')
+    ->aggregateSum('total_sales_count', 'sale_count')
+    ->limit(0) // We only want aggregations, not documents
+    ->get();
+
+$aggregations = $result->getAggregations();
+
+echo "Total Revenue: " . $aggregations['total_revenue']['value'];
+echo "Total Sales: " . $aggregations['total_sales_count']['value'];
+```
+
+#### Group By (Like SQL GROUP BY)
+```php
+<?php
+
+// Sales by brand (like: SELECT brand_id, COUNT(*), SUM(sale_count) FROM products GROUP BY brand_id)
+$result = StoreProduct::search()
+    ->where('store_id', 1)
+    ->where('state', 'published')
+    ->groupByWithMetrics('sales_by_brand', 'brand.id', [
+        'total_products' => 'value_count:id',
+        'total_sales' => 'sum:sale_count',
+        'avg_price' => 'avg:price',
+        'total_revenue' => 'sum:price',
+    ], 50) // Top 50 brands
+    ->limit(0)
+    ->get();
+
+$aggregations = $result->getAggregations();
+
+foreach ($aggregations['sales_by_brand']['buckets'] as $bucket) {
+    echo "Brand ID: {$bucket['key']}\n";
+    echo "Products: {$bucket['total_products']['value']}\n";
+    echo "Total Sales: {$bucket['total_sales']['value']}\n";
+    echo "Average Price: {$bucket['avg_price']['value']}\n";
+    echo "Revenue: {$bucket['total_revenue']['value']}\n";
+    echo "---\n";
+}
+```
+### Multiple Group Bys
+```php
+<?php
+
+// Sales by brand and category
+$result = StoreProduct::search()
+    ->where('store_id', 1)
+    ->groupBy('by_brand', 'brand.id', 20, [
+        // For each brand, group by main category
+        'by_category' => [
+            'terms' => [
+                'field' => 'main_category_id',
+                'size' => 10
+            ],
+            'aggs' => [
+                'total_sales' => ['sum' => ['field' => 'sale_count']],
+                'total_revenue' => ['sum' => ['field' => 'price']],
+                'avg_rating' => ['avg' => ['field' => 'rating']],
+            ]
+        ]
+    ])
+    ->limit(0)
+    ->get();
+
+$aggregations = $result->getAggregations();
+
+foreach ($aggregations['by_brand']['buckets'] as $brandBucket) {
+    echo "Brand ID: {$brandBucket['key']}\n";
+    
+    foreach ($brandBucket['by_category']['buckets'] as $categoryBucket) {
+        echo "  Category ID: {$categoryBucket['key']}\n";
+        echo "    Sales: {$categoryBucket['total_sales']['value']}\n";
+        echo "    Revenue: {$categoryBucket['total_revenue']['value']}\n";
+        echo "    Avg Rating: {$categoryBucket['avg_rating']['value']}\n";
+    }
+    echo "\n";
+}
+```
+### Date Histogram (Sales Over Time)
+```php
+
+
+// Sales per day for the last 30 days
+$result = StoreProduct::search()
+    ->where('store_id', 1)
+    ->whereGreaterThan('created_at', now()->subDays(30)->toDateString())
+    ->groupByDate('sales_by_day', 'created_at', 'day', [
+        'product_count' => ['value_count' => ['field' => 'id']],
+        'total_sales' => ['sum' => ['field' => 'sale_count']],
+        'total_revenue' => ['sum' => ['field' => 'price']],
+    ])
+    ->limit(0)
+    ->get();
+
+$aggregations = $result->getAggregations();
+
+foreach ($aggregations['sales_by_day']['buckets'] as $bucket) {
+    echo "Date: {$bucket['key_as_string']}\n";
+    echo "Products Listed: {$bucket['product_count']['value']}\n";
+    echo "Sales: {$bucket['total_sales']['value']}\n";
+    echo "Revenue: {$bucket['total_revenue']['value']}\n";
+    echo "---\n";
+}
+```
+### Range Aggregation (Price Ranges)
+```php
+<?php
+
+// Products grouped by price ranges
+$result = StoreProduct::search()
+    ->where('store_id', 1)
+    ->where('state', 'published')
+    ->groupByRange('products_by_price', 'price', [
+        ['key' => 'budget', 'to' => 100000],
+        ['key' => 'mid_range', 'from' => 100000, 'to' => 500000],
+        ['key' => 'premium', 'from' => 500000, 'to' => 1000000],
+        ['key' => 'luxury', 'from' => 1000000],
+    ], [
+        'avg_rating' => ['avg' => ['field' => 'rating']],
+        'total_sales' => ['sum' => ['field' => 'sale_count']],
+    ])
+    ->limit(0)
+    ->get();
+
+$aggregations = $result->getAggregations();
+
+foreach ($aggregations['products_by_price']['buckets'] as $bucket) {
+    echo "Range: {$bucket['key']}\n";
+    echo "Count: {$bucket['doc_count']}\n";
+    echo "Avg Rating: {$bucket['avg_rating']['value']}\n";
+    echo "Total Sales: {$bucket['total_sales']['value']}\n";
+    echo "---\n";
+}
+```
+#### Nested Aggregation (Category Sales)
+```php
+<?php
+
+// Total sales by category (nested field)
+$result = StoreProduct::search()
+    ->where('store_id', 1)
+    ->where('state', 'published')
+    ->aggregateNested('categories_analysis', 'categories', [
+        'by_category' => [
+            'terms' => [
+                'field' => 'categories.id',
+                'size' => 50
+            ],
+            'aggs' => [
+                // Reverse nested to get parent document metrics
+                'products' => [
+                    'reverse_nested' => new \stdClass(),
+                    'aggs' => [
+                        'total_sales' => ['sum' => ['field' => 'sale_count']],
+                        'total_revenue' => ['sum' => ['field' => 'price']],
+                        'avg_price' => ['avg' => ['field' => 'price']],
+                        'avg_rating' => ['avg' => ['field' => 'rating']],
+                    ]
+                ]
+            ]
+        ]
+    ])
+    ->limit(0)
+    ->get();
+
+$aggregations = $result->getAggregations();
+
+foreach ($aggregations['categories_analysis']['by_category']['buckets'] as $bucket) {
+    echo "Category ID: {$bucket['key']}\n";
+    echo "Products: {$bucket['doc_count']}\n";
+    echo "Total Sales: {$bucket['products']['total_sales']['value']}\n";
+    echo "Total Revenue: {$bucket['products']['total_revenue']['value']}\n";
+    echo "Avg Price: {$bucket['products']['avg_price']['value']}\n";
+    echo "Avg Rating: {$bucket['products']['avg_rating']['value']}\n";
+    echo "---\n";
+}
+```
+#### Top Products Per Brand 
+```php
+<?php
+
+// Top 3 best-selling products per brand
+$result = StoreProduct::search()
+    ->where('store_id', 1)
+    ->where('state', 'published')
+    ->groupBy('by_brand', 'brand.id', 20, [
+        'top_products' => [
+            'top_hits' => [
+                'size' => 3,
+                'sort' => [
+                    ['sale_count' => ['order' => 'desc']]
+                ],
+                '_source' => ['id', 'title', 'price', 'sale_count']
+            ]
+        ],
+        'total_sales' => ['sum' => ['field' => 'sale_count']],
+    ])
+    ->limit(0)
+    ->get();
+
+$aggregations = $result->getAggregations();
+
+foreach ($aggregations['by_brand']['buckets'] as $bucket) {
+    echo "Brand ID: {$bucket['key']}\n";
+    echo "Total Sales: {$bucket['total_sales']['value']}\n";
+    echo "Top Products:\n";
+    
+    foreach ($bucket['top_products']['hits']['hits'] as $hit) {
+        $product = $hit['_source'];
+        echo "  - {$product['title']} (Sales: {$product['sale_count']})\n";
+    }
+    echo "\n";
+}
+```
+####  Statistical Analysis
+```php
+<?php
+
+// Comprehensive price statistics
+$result = StoreProduct::search()
+    ->where('store_id', 1)
+    ->where('state', 'published')
+    ->aggregateExtendedStats('price_analysis', 'price')
+    ->aggregatePercentiles('price_percentiles', 'price', [10, 25, 50, 75, 90, 95, 99])
+    ->aggregateCardinality('unique_brands', 'brand.id')
+    ->aggregateCardinality('unique_categories', 'main_category_id')
+    ->limit(0)
+    ->get();
+
+$aggregations = $result->getAggregations();
+
+$stats = $aggregations['price_analysis'];
+echo "Price Statistics:\n";
+echo "Count: {$stats['count']}\n";
+echo "Min: {$stats['min']}\n";
+echo "Max: {$stats['max']}\n";
+echo "Avg: {$stats['avg']}\n";
+echo "Sum: {$stats['sum']}\n";
+echo "Std Deviation: {$stats['std_deviation']}\n";
+echo "Variance: {$stats['variance']}\n";
+
+echo "\nPrice Percentiles:\n";
+foreach ($aggregations['price_percentiles']['values'] as $percentile => $value) {
+    echo "{$percentile}th: {$value}\n";
+}
+
+echo "\nUnique Brands: {$aggregations['unique_brands']['value']}\n";
+echo "Unique Categories: {$aggregations['unique_categories']['value']}\n";
+```
+### Complete Analytics Dashboard
+```php
+namespace App\Http\Controllers\Api\V1\Analytics;
+
+use App\Models\StoreProduct;
+use Illuminate\Http\Request;
+
+class ProductAnalyticsController
+{
+    /**
+     * Get comprehensive product analytics
+     */
+    public function dashboard(Request $request)
+    {
+        $storeId = $request->user()->store_id;
+        $startDate = $request->input('start_date', now()->subDays(30)->toDateString());
+        $endDate = $request->input('end_date', now()->toDateString());
+        
+        $query = StoreProduct::search()
+            ->where('store_id', $storeId)
+            ->whereBetween('created_at', [$startDate, $endDate]);
+        
+        // Overall metrics
+        $query->aggregateSum('total_revenue', 'price')
+              ->aggregateSum('total_sales', 'sale_count')
+              ->aggregateAvg('avg_price', 'price')
+              ->aggregateAvg('avg_rating', 'rating')
+              ->aggregateCount('total_products', 'id');
+        
+        // Sales by brand
+        $query->groupByWithMetrics('by_brand', 'brand.id', [
+            'revenue' => 'sum:price',
+            'sales' => 'sum:sale_count',
+            'products' => 'value_count:id',
+            'avg_rating' => 'avg:rating',
+        ], 20, ['order' => ['revenue' => 'desc']]);
+        
+        // Sales by category (nested)
+        $query->aggregateNested('by_category', 'categories', [
+            'category_breakdown' => [
+                'terms' => [
+                    'field' => 'categories.id',
+                    'size' => 30,
+                    'order' => ['revenue' => 'desc']
+                ],
+                'aggs' => [
+                    'parent_docs' => [
+                        'reverse_nested' => new \stdClass(),
+                        'aggs' => [
+                            'revenue' => ['sum' => ['field' => 'price']],
+                            'sales' => ['sum' => ['field' => 'sale_count']],
+                            'avg_rating' => ['avg' => ['field' => 'rating']],
+                        ]
+                    ]
+                ]
+            ]
+        ]);
+        
+        // Price distribution
+        $query->groupByRange('price_distribution', 'price', [
+            ['key' => 'under_100k', 'to' => 100000],
+            ['key' => '100k_250k', 'from' => 100000, 'to' => 250000],
+            ['key' => '250k_500k', 'from' => 250000, 'to' => 500000],
+            ['key' => '500k_1m', 'from' => 500000, 'to' => 1000000],
+            ['key' => 'over_1m', 'from' => 1000000],
+        ], [
+            'sales' => ['sum' => ['field' => 'sale_count']],
+        ]);
+        
+        // Daily trends
+        $query->groupByDate('daily_trends', 'created_at', 'day', [
+            'products' => ['value_count' => ['field' => 'id']],
+            'revenue' => ['sum' => ['field' => 'price']],
+            'sales' => ['sum' => ['field' => 'sale_count']],
+        ]);
+        
+        // Rating distribution
+        $query->groupByRange('rating_distribution', 'rating', [
+            ['key' => '5_star', 'from' => 4.5],
+            ['key' => '4_star', 'from' => 3.5, 'to' => 4.5],
+            ['key' => '3_star', 'from' => 2.5, 'to' => 3.5],
+            ['key' => '2_star', 'from' => 1.5, 'to' => 2.5],
+            ['key' => '1_star', 'to' => 1.5],
+        ]);
+        
+        // Top performing products
+        $query->aggregate('top_products', [
+            'terms' => [
+                'field' => 'id',
+                'size' => 10,
+                'order' => ['total_sales' => 'desc']
+            ],
+            'aggs' => [
+                'total_sales' => ['sum' => ['field' => 'sale_count']],
+                'product_details' => [
+                    'top_hits' => [
+                        'size' => 1,
+                        '_source' => ['title', 'price', 'sale_count', 'rating']
+                    ]
+                ]
+            ]
+        ]);
+        
+        $query->limit(0);
+        $aggregations = $query->getAggregations();
+        
+        return response()->json([
+            'period' => [
+                'start' => $startDate,
+                'end' => $endDate,
+            ],
+            'overview' => [
+                'total_revenue' => $aggregations['total_revenue']['value'] ?? 0,
+                'total_sales' => $aggregations['total_sales']['value'] ?? 0,
+                'total_products' => $aggregations['total_products']['value'] ?? 0,
+                'avg_price' => $aggregations['avg_price']['value'] ?? 0,
+                'avg_rating' => $aggregations['avg_rating']['value'] ?? 0,
+            ],
+            'by_brand' => $this->formatBrandAnalytics($aggregations['by_brand'] ?? []),
+            'by_category' => $this->formatCategoryAnalytics($aggregations['by_category'] ?? []),
+            'price_distribution' => $aggregations['price_distribution']['buckets'] ?? [],
+            'daily_trends' => $aggregations['daily_trends']['buckets'] ?? [],
+            'rating_distribution' => $aggregations['rating_distribution']['buckets'] ?? [],
+            'top_products' => $this->formatTopProducts($aggregations['top_products'] ?? []),
+        ]);
+    }
+    
+    protected function formatBrandAnalytics(array $data): array
+    {
+        $buckets = $data['buckets'] ?? [];
+        $brandIds = collect($buckets)->pluck('key')->toArray();
+        $brands = \App\Models\Brand::whereIn('id', $brandIds)->get();
+        
+        return collect($buckets)->map(function($bucket) use ($brands) {
+            $brand = $brands->firstWhere('id', $bucket['key']);
+            
+            return [
+                'brand_id' => $bucket['key'],
+                'brand_name' => $brand?->name ?? 'Unknown',
+                'revenue' => $bucket['revenue']['value'] ?? 0,
+                'sales' => $bucket['sales']['value'] ?? 0,
+                'products' => $bucket['products']['value'] ?? 0,
+                'avg_rating' => round($bucket['avg_rating']['value'] ?? 0, 2),
+            ];
+        })->toArray();
+    }
+    
+    protected function formatCategoryAnalytics(array $data): array
+    {
+        $buckets = $data['category_breakdown']['buckets'] ?? [];
+        $categoryIds = collect($buckets)->pluck('key')->toArray();
+        $categories = \App\Models\Category::whereIn('id', $categoryIds)->get();
+        
+        return collect($buckets)->map(function($bucket) use ($categories) {
+            $category = $categories->firstWhere('id', $bucket['key']);
+            
+            return [
+                'category_id' => $bucket['key'],
+                'category_name' => $category?->title ?? 'Unknown',
+                'revenue' => $bucket['parent_docs']['revenue']['value'] ?? 0,
+                'sales' => $bucket['parent_docs']['sales']['value'] ?? 0,
+                'avg_rating' => round($bucket['parent_docs']['avg_rating']['value'] ?? 0, 2),
+            ];
+        })->toArray();
+    }
+    
+    protected function formatTopProducts(array $data): array
+    {
+        $buckets = $data['buckets'] ?? [];
+        
+        return collect($buckets)->map(function($bucket) {
+            $product = $bucket['product_details']['hits']['hits'][0]['_source'] ?? [];
+            
+            return [
+                'product_id' => $bucket['key'],
+                'title' => $product['title'] ?? 'Unknown',
+                'price' => $product['price'] ?? 0,
+                'total_sales' => $bucket['total_sales']['value'] ?? 0,
+                'rating' => $product['rating'] ?? 0,
+            ];
+        })->toArray();
+    }
+}
+```
+
+## Complex Examples
+![img.png](docs/img.png)
 ### Example 1: E-commerce Product Search
 
 ```php

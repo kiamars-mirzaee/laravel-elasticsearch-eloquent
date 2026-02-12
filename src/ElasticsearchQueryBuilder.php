@@ -889,4 +889,329 @@ class ElasticsearchQueryBuilder
 
         return empty($bool) ? ['match_all' => new \stdClass()] : ['bool' => $bool];
     }
+
+
+
+
+
+
+
+
+
+// Add these methods to ElasticsearchQueryBuilder class
+
+    /**
+     * Sum aggregation
+     */
+    public function aggregateSum(string $name, string $field): self
+    {
+        return $this->aggregate($name, [
+            'sum' => ['field' => $field]
+        ]);
+    }
+
+    /**
+     * Average aggregation
+     */
+    public function aggregateAvg(string $name, string $field): self
+    {
+        return $this->aggregate($name, [
+            'avg' => ['field' => $field]
+        ]);
+    }
+
+    /**
+     * Min aggregation
+     */
+    public function aggregateMin(string $name, string $field): self
+    {
+        return $this->aggregate($name, [
+            'min' => ['field' => $field]
+        ]);
+    }
+
+    /**
+     * Max aggregation
+     */
+    public function aggregateMax(string $name, string $field): self
+    {
+        return $this->aggregate($name, [
+            'max' => ['field' => $field]
+        ]);
+    }
+
+    /**
+     * Count (value_count) aggregation
+     */
+    public function aggregateCount(string $name, string $field): self
+    {
+        return $this->aggregate($name, [
+            'value_count' => ['field' => $field]
+        ]);
+    }
+
+    /**
+     * Cardinality (distinct count) aggregation
+     */
+    public function aggregateCardinality(string $name, string $field, int $precisionThreshold = 3000): self
+    {
+        return $this->aggregate($name, [
+            'cardinality' => [
+                'field' => $field,
+                'precision_threshold' => $precisionThreshold
+            ]
+        ]);
+    }
+
+    /**
+     * Percentiles aggregation
+     */
+    public function aggregatePercentiles(string $name, string $field, array $percents = [25, 50, 75, 95, 99]): self
+    {
+        return $this->aggregate($name, [
+            'percentiles' => [
+                'field' => $field,
+                'percents' => $percents
+            ]
+        ]);
+    }
+
+    /**
+     * Extended stats aggregation (includes sum, avg, min, max, variance, std_deviation, etc.)
+     */
+    public function aggregateExtendedStats(string $name, string $field): self
+    {
+        return $this->aggregate($name, [
+            'extended_stats' => ['field' => $field]
+        ]);
+    }
+
+    /**
+     * Group by aggregation (like SQL GROUP BY)
+     *
+     * @param string $name Aggregation name
+     * @param string $field Field to group by
+     * @param int $size Number of buckets to return
+     * @param array $subAggregations Optional sub-aggregations (metrics for each group)
+     * @param array $options Additional options (order, missing, etc.)
+     */
+    public function groupBy(string $name, string $field, int $size = 10, array $subAggregations = [], array $options = []): self
+    {
+        $termAgg = array_merge([
+            'field' => $field,
+            'size' => $size
+        ], $options);
+
+        $aggregation = ['terms' => $termAgg];
+
+        // Add sub-aggregations (metrics for each group)
+        if (!empty($subAggregations)) {
+            $aggregation['aggs'] = $subAggregations;
+        }
+
+        return $this->aggregate($name, $aggregation);
+    }
+
+    /**
+     * Group by with sum (like SQL: SELECT field, SUM(sumField) GROUP BY field)
+     */
+    public function groupByWithSum(string $name, string $groupField, string $sumField, int $size = 10, array $options = []): self
+    {
+        return $this->groupBy($name, $groupField, $size, [
+            'total' => [
+                'sum' => ['field' => $sumField]
+            ]
+        ], $options);
+    }
+
+    /**
+     * Group by with multiple metrics
+     */
+    public function groupByWithMetrics(string $name, string $groupField, array $metrics, int $size = 10, array $options = []): self
+    {
+        $subAggs = [];
+
+        foreach ($metrics as $metricName => $metric) {
+            if (is_string($metric)) {
+                // Simple format: ['total_sales' => 'sum:sale_count']
+                [$type, $field] = explode(':', $metric);
+                $subAggs[$metricName] = [$type => ['field' => $field]];
+            } else {
+                // Full format: ['total_sales' => ['sum' => ['field' => 'sale_count']]]
+                $subAggs[$metricName] = $metric;
+            }
+        }
+
+        return $this->groupBy($name, $groupField, $size, $subAggs, $options);
+    }
+
+    /**
+     * Date histogram aggregation (group by date intervals)
+     */
+    public function groupByDate(string $name, string $field, string $interval = 'day', array $subAggregations = [], array $options = []): self
+    {
+        $dateHistogram = array_merge([
+            'field' => $field,
+            'calendar_interval' => $interval, // day, week, month, quarter, year
+            'format' => 'yyyy-MM-dd',
+            'min_doc_count' => 0
+        ], $options);
+
+        $aggregation = ['date_histogram' => $dateHistogram];
+
+        if (!empty($subAggregations)) {
+            $aggregation['aggs'] = $subAggregations;
+        }
+
+        return $this->aggregate($name, $aggregation);
+    }
+
+    /**
+     * Range aggregation (group by ranges)
+     */
+    public function groupByRange(string $name, string $field, array $ranges, array $subAggregations = []): self
+    {
+        $aggregation = [
+            'range' => [
+                'field' => $field,
+                'ranges' => $ranges
+            ]
+        ];
+
+        if (!empty($subAggregations)) {
+            $aggregation['aggs'] = $subAggregations;
+        }
+
+        return $this->aggregate($name, $aggregation);
+    }
+
+    /**
+     * Histogram aggregation (group by numeric intervals)
+     */
+    public function groupByHistogram(string $name, string $field, int $interval, array $subAggregations = [], array $options = []): self
+    {
+        $histogram = array_merge([
+            'field' => $field,
+            'interval' => $interval,
+            'min_doc_count' => 0
+        ], $options);
+
+        $aggregation = ['histogram' => $histogram];
+
+        if (!empty($subAggregations)) {
+            $aggregation['aggs'] = $subAggregations;
+        }
+
+        return $this->aggregate($name, $aggregation);
+    }
+
+    /**
+     * Nested aggregation (for nested fields)
+     */
+    public function aggregateNested(string $name, string $path, array $subAggregations): self
+    {
+        return $this->aggregate($name, [
+            'nested' => ['path' => $path],
+            'aggs' => $subAggregations
+        ]);
+    }
+
+    /**
+     * Filter aggregation (aggregate only matching documents)
+     */
+    public function aggregateFilter(string $name, array $filter, array $subAggregations): self
+    {
+        return $this->aggregate($name, [
+            'filter' => $filter,
+            'aggs' => $subAggregations
+        ]);
+    }
+
+    /**
+     * Filters aggregation (multiple named filters)
+     */
+    public function aggregateFilters(string $name, array $filters, array $subAggregations = []): self
+    {
+        $aggregation = [
+            'filters' => [
+                'filters' => $filters
+            ]
+        ];
+
+        if (!empty($subAggregations)) {
+            $aggregation['aggs'] = $subAggregations;
+        }
+
+        return $this->aggregate($name, $aggregation);
+    }
+
+    /**
+     * Top hits aggregation (get top documents per bucket)
+     */
+    public function aggregateTopHits(string $name, int $size = 1, array $options = []): self
+    {
+        return $this->aggregate($name, [
+            'top_hits' => array_merge([
+                'size' => $size
+            ], $options)
+        ]);
+    }
+
+    /**
+     * Bucket sort aggregation (sort and limit buckets)
+     */
+    public function aggregateBucketSort(string $name, array $sort, int $size = null, int $gap_policy = null): self
+    {
+        $config = ['sort' => $sort];
+
+        if ($size !== null) {
+            $config['size'] = $size;
+        }
+
+        if ($gap_policy !== null) {
+            $config['gap_policy'] = $gap_policy;
+        }
+
+        return $this->aggregate($name, [
+            'bucket_sort' => $config
+        ]);
+    }
+
+    /**
+     * Pipeline aggregation - bucket selector
+     */
+    public function aggregateBucketSelector(string $name, array $bucketsPath, string $script): self
+    {
+        return $this->aggregate($name, [
+            'bucket_selector' => [
+                'buckets_path' => $bucketsPath,
+                'script' => $script
+            ]
+        ]);
+    }
+
+    /**
+     * Global aggregation (ignore query filters)
+     */
+    public function aggregateGlobal(string $name, array $subAggregations): self
+    {
+        return $this->aggregate($name, [
+            'global' => new \stdClass(),
+            'aggs' => $subAggregations
+        ]);
+    }
+
+    /**
+     * Reverse nested aggregation
+     */
+    public function aggregateReverseNested(string $name, ?string $path = null, array $subAggregations = []): self
+    {
+        $aggregation = ['reverse_nested' => $path ? ['path' => $path] : new \stdClass()];
+
+        if (!empty($subAggregations)) {
+            $aggregation['aggs'] = $subAggregations;
+        }
+
+        return $this->aggregate($name, $aggregation);
+    }
 }
