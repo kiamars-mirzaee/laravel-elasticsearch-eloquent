@@ -22,6 +22,7 @@ An elegant Eloquent-style query builder for Elasticsearch in Laravel. Write Elas
 
 Install via Composer:
 
+
 ```bash
 composer require kiamars-mirzaee/elasticsearch-eloquent
 ```
@@ -42,8 +43,753 @@ ELASTICSEARCH_USERNAME=
 ELASTICSEARCH_PASSWORD=
 ```
 
-## Quick Start
+## Quick Start Query conversion
 
+Direct Conversion
+```php
+
+// MySQL/Eloquent version
+->when(is_array($allowed_category_ids) && count($allowed_category_ids) > 0, function($q) use ($allowed_category_ids) {
+    $q->whereHas('categories', fn($query) => $query->whereIn('categories.id', $allowed_category_ids));
+})
+
+// Elasticsearch version
+->when(is_array($allowed_category_ids) && count($allowed_category_ids) > 0, function($q) use ($allowed_category_ids) {
+    $q->whereNested('categories', fn($query) => $query->whereIn('id', $allowed_category_ids));
+})
+
+// Or using the cleaner whenHasAny helper
+->whenHasAny($allowed_category_ids ?? [], function($q, $categoryIds) {
+    $q->whereNested('categories', fn($query) => $query->whereIn('id', $categoryIds));
+})
+```
+
+from direct usage
+convert this to builder
+
+```php
+$elSearchQuery = [
+    'index' => $index,
+    'body' => [
+        "size"=>$maxSuggestions,
+        "_source"=>[$fieldName],
+        "query"=>[
+            "bool"=>[
+                "should"=>[
+                    [
+                        "prefix" => [
+                            "{$fieldName}.kw" => [
+                                "value" => $searchTerm,
+                                "boost" => 3,
+                            ],
+                        ],
+                    ],
+                    ["match_phrase_prefix" => [
+                        "{$fieldName}.normalized" => [
+                            "query" => $searchTerm,
+                            "analyzer" => "persian_normalized_analyzer",
+                            "boost" => 2,
+                        ]
+                    ],],
+                    ["match_bool_prefix" => [
+                        "{$fieldName}" => [
+                            "query" => $searchTerm,
+                            "boost" => 1,
+                        ]
+                    ],]
+                ],
+            ]
+        ],
+        "collapse"=>[
+            "field"=>"{$fieldName}.kw",
+        ]
+    ],
+];
+// Or Using Fluent Methods (Cleaner):
+$results = StoreProduct::search()
+    ->select([$fieldName])
+    ->wherePrefix("{$fieldName}.kw", $searchTerm, ['boost' => 3])
+    ->matchPhrasePrefix("{$fieldName}.normalized", $searchTerm, [
+        'analyzer' => 'persian_normalized_analyzer',
+        'boost' => 2
+    ])
+    ->matchBoolPrefix($fieldName, $searchTerm, ['boost' => 1])
+    ->collapse("{$fieldName}.kw")
+    ->limit($maxSuggestions)
+    ->get();
+    
+// Original raw query converted to builder pattern
+$results = StoreProduct::search()
+    ->select([$fieldName])
+    ->shouldRaw([
+        'prefix' => [
+            "{$fieldName}.kw" => [
+                'value' => $searchTerm,
+                'boost' => 3,
+            ]
+        ]
+    ])
+    ->shouldRaw([
+        'match_phrase_prefix' => [
+            "{$fieldName}.normalized" => [
+                'query' => $searchTerm,
+                'analyzer' => 'persian_normalized_analyzer',
+                'boost' => 2,
+            ]
+        ]
+    ])
+    ->shouldRaw([
+        'match_bool_prefix' => [
+            $fieldName => [
+                'query' => $searchTerm,
+                'boost' => 1,
+            ]
+        ]
+    ])
+    ->collapse("{$fieldName}.kw")
+    ->limit($maxSuggestions)
+    ->get();
+```
+
+#### Product Title Autocomplete
+
+```php
+use App\Services\Elasticsearch\AutocompleteBuilder;
+
+// In your controller or service
+public function autocompleteProductTitles(Request $request)
+{
+    $searchTerm = $request->input('q');
+    
+    $builder = new AutocompleteBuilder(
+        app(\Elastic\Elasticsearch\Client::class),
+        'products_index'
+    );
+    
+    $results = $builder
+        ->suggestions('title', $searchTerm, 10)
+        ->get();
+    
+    return response()->json([
+        'suggestions' => $results->pluck('title')
+    ]);
+}
+
+```
+
+### Multi-field Autocomplete 
+```php
+<?php
+
+public function autocompleteProducts(Request $request)
+{
+    $searchTerm = $request->input('q');
+    
+    $results = StoreProduct::search()
+        ->where('store_id', 1)
+        ->where('can_purchase', true)
+        // Search across multiple fields
+        ->shouldRaw([
+            'prefix' => [
+                'title.kw' => [
+                    'value' => $searchTerm,
+                    'boost' => 5
+                ]
+            ]
+        ])
+        ->shouldRaw([
+            'prefix' => [
+                'brand.name.kw' => [
+                    'value' => $searchTerm,
+                    'boost' => 3
+                ]
+            ]
+        ])
+        ->shouldRaw([
+            'match_phrase_prefix' => [
+                'title.normalized' => [
+                    'query' => $searchTerm,
+                    'analyzer' => 'persian_normalized_analyzer',
+                    'boost' => 2
+                ]
+            ]
+        ])
+        ->minimumShouldMatch(1)
+        ->select(['id', 'title', 'slug', 'brand', 'price', 'img_src'])
+        ->limit(10)
+        ->get();
+    
+    return response()->json([
+        'products' => $results
+    ]);
+}
+```
+
+## Category Suggestions
+```php
+
+<?php
+
+public function autocompleteCategories(Request $request)
+{
+    $searchTerm = $request->input('q');
+    
+    $builder = new AutocompleteBuilder(
+        app(\Elastic\Elasticsearch\Client::class),
+        config('elasticsearch.index_prefix') . '_products'
+    );
+    
+    $results = $builder
+        ->whereNested('categories', function($q) use ($searchTerm) {
+            $q->shouldRaw([
+                'prefix' => [
+                    'categories.title.kw' => [
+                        'value' => $searchTerm,
+                        'boost' => 3
+                    ]
+                ]
+            ])
+            ->shouldRaw([
+                'match_phrase_prefix' => [
+                    'categories.title' => [
+                        'query' => $searchTerm,
+                        'boost' => 2
+                    ]
+                ]
+            ]);
+        })
+        ->collapse('categories.id')
+        ->select(['categories'])
+        ->limit(10)
+        ->get();
+    
+    return response()->json([
+        'categories' => $results->pluck('categories')->flatten(1)->unique('id')
+    ]);
+}
+```
+
+####  Brand Name Suggestions with Filters
+```php
+<?php
+
+public function autocompleteBrands(Request $request)
+{
+    $searchTerm = $request->input('q');
+    
+    $results = StoreProduct::search()
+        ->where('store_id', 1)
+        ->where('state', 'published')
+        ->autocomplete('brand.name', $searchTerm)
+        ->collapse('brand.id.keyword')
+        ->select(['brand.id', 'brand.name', 'brand.slug'])
+        ->limit(10)
+        ->get();
+    
+    return response()->json([
+        'brands' => $results->map(fn($item) => [
+            'id' => $item['brand']['id'],
+            'name' => $item['brand']['name'],
+            'slug' => $item['brand']['slug']
+        ])
+    ]);
+}
+
+```
+### Advanced Suggestions with Highlighting
+```php
+<?php
+
+public function advancedAutocomplete(Request $request)
+{
+    $searchTerm = $request->input('q');
+    
+    $results = StoreProduct::search()
+        ->autocomplete('title', $searchTerm, [
+            'boost' => [
+                'prefix' => 5,
+                'phrase' => 3,
+                'bool' => 1
+            ]
+        ])
+        ->where('can_purchase', true)
+        ->whereGreaterThan('rating', 4.0)
+        ->highlight(['title'], [
+            'pre_tags' => ['<mark>'],
+            'post_tags' => ['</mark>'],
+            'fragment_size' => 150
+        ])
+        ->select(['id', 'title', 'slug', 'price', 'img_src', 'rating'])
+        ->collapse('title.kw')
+        ->orderByDesc('_score')
+        ->orderByDesc('sale_count')
+        ->limit(10)
+        ->get();
+    
+    return response()->json([
+        'suggestions' => $results->map(fn($item) => [
+            'id' => $item['id'],
+            'title' => $item['title'],
+            'highlighted' => $item['_highlight']['title'][0] ?? $item['title'],
+            'slug' => $item['slug'],
+            'price' => $item['price'],
+            'img_src' => $item['img_src'],
+            'rating' => $item['rating'],
+            'score' => $item['_score']
+        ])
+    ]);
+}
+```
+## Use when condition
+```php
+<?php
+
+use App\Models\StoreProduct;
+
+// Simple condition
+StoreProduct::search()
+    ->when($request->has('category_id'), function ($query) use ($request) {
+        $query->where('categories.id', $request->input('category_id'));
+    })
+    ->when($request->filled('min_price'), function ($query, $value) {
+        $query->whereGreaterThanOrEqual('price', $value);
+    })
+    ->get();
+
+// With else/default callback
+StoreProduct::search()
+    ->when(
+        $request->filled('sort'),
+        fn($q, $sort) => $q->orderBy('price', $sort === 'asc' ? 'asc' : 'desc'),
+        fn($q) => $q->orderByDesc('created_at') // Default sorting
+    )
+    ->get();
+```
+advance when
+```php
+<?php
+
+StoreProduct::search()
+    ->setRequest($request)
+    ->whenFilled('search', function ($query, $searchTerm) {
+        $query->multiMatch(
+            ['title', 'title.normalized', 'search_text'],
+            $searchTerm,
+            ['fuzziness' => 'AUTO']
+        );
+    })
+    ->whenFilled('brand_id', fn($q, $brandId) => 
+        $q->where('brand.id', $brandId)
+    )
+    ->whenFilled(['min_price', 'max_price'], function ($query) use ($request) {
+        $query->whereBetween('price', [
+            $request->input('min_price'),
+            $request->input('max_price')
+        ]);
+    })
+    ->whenBoolean('in_stock', fn($q) => 
+        $q->where('out_of_stock', false)
+          ->whereGreaterThan('stock', 0)
+    )
+    ->whenHasAny(['tags', 'collections'], function ($query) use ($request) {
+        $query->orWhere(function ($q) use ($request) {
+            if ($request->filled('tags')) {
+                $q->whereNested('tags', fn($tq) => 
+                    $tq->whereIn('id', $request->input('tags'))
+                );
+            }
+            if ($request->filled('collections')) {
+                $q->whereNested('collections', fn($cq) => 
+                    $cq->whereIn('id', $request->input('collections'))
+                );
+            }
+        });
+    })
+    ->paginate(20);
+```
+
+### Switch Statement Pattern 
+```php
+<?php
+
+$sortBy = $request->input('sort', 'relevant');
+
+StoreProduct::search()
+    ->switch($sortBy, [
+        'newest' => fn($q) => $q->orderByDesc('created_at'),
+        'most_viewed' => fn($q) => $q->orderByDesc('num_review'),
+        'best_selling' => fn($q) => $q->orderByDesc('sale_count'),
+        'cheapest' => fn($q) => $q->orderBy('price', 'asc'),
+        'most_expensive' => fn($q) => $q->orderByDesc('price'),
+        'fastest_delivery' => fn($q) => $q->orderBy('preparation_time_in_day', 'asc'),
+        'buyer_recommended' => fn($q) => $q->orderByDesc('rating'),
+    ], fn($q) => $q->orderByDesc('_score')) // Default
+    ->get();
+```
+# Nested Conditionals 
+```php
+<?php
+
+StoreProduct::search()
+    ->when($request->filled('filter_type'), function ($query) use ($request) {
+        $filterType = $request->input('filter_type');
+        
+        $query->switch($filterType, [
+            'new_arrivals' => fn($q) => 
+                $q->whereGreaterThan('created_at', now()->subDays(30)->toDateString())
+                  ->orderByDesc('created_at'),
+                  
+            'best_sellers' => fn($q) => 
+                $q->whereGreaterThan('sale_count', 100)
+                  ->orderByDesc('sale_count'),
+                  
+            'on_sale' => fn($q) => 
+                $q->whereNotNull('sale_price')
+                  ->when($request->filled('min_discount'), fn($subQ, $minDiscount) => 
+                      $subQ->whereGreaterThanOrEqual('discount_percent', $minDiscount)
+                  ),
+                  
+            'highly_rated' => fn($q) => 
+                $q->whereGreaterThanOrEqual('rating', 4.5)
+                  ->whereGreaterThan('total_rating', 50)
+                  ->orderByDesc('rating'),
+        ]);
+    })
+    ->get();
+```
+# Performance Optimization with Conditionals 
+```php
+<?php
+
+StoreProduct::search()
+    // Only load expensive aggregations if needed
+    ->when($request->boolean('need_facets'), function ($query) {
+        $query->aggregateTerms('popular_brands', 'brand.id', 50)
+              ->aggregateTerms('categories', 'categories.id', 100)
+              ->aggregate('price_ranges', [
+                  'range' => [
+                      'field' => 'price',
+                      'ranges' => [
+                          ['to' => 100000],
+                          ['from' => 100000, 'to' => 500000],
+                          ['from' => 500000, 'to' => 1000000],
+                          ['from' => 1000000]
+                      ]
+                  ]
+              ]);
+    })
+    
+    // Limit source fields for list view vs detail view
+    ->when($request->input('view') === 'list', 
+        fn($q) => $q->select(['id', 'title', 'price', 'img_src', 'rating']),
+        fn($q) => $q->select(['*'])
+    )
+    
+    // Use scroll API for large result sets
+    ->when($request->boolean('export'), function ($query) {
+        $query->limit(1000);
+    }, function ($query) {
+        $query->limit(20);
+    })
+    
+    ->get();
+```
+
+## relations
+
+The Key Difference: Object vs Nested
+```php
+<?php
+
+// Brand - Single Object (ONE brand per product)
+->whereIn('brand.id', $allowed_brand_ids)
+
+// Categories - Array of Nested Objects (MULTIPLE categories per product)
+->whereNested('categories', fn($query) => $query->whereIn('id', $allowed_category_ids))
+```
+
+Why This Matters in Elasticsearch
+Brand Query (Object)
+```php
+<?php
+
+// ✅ CORRECT for single object
+->whereIn('brand.id', [10, 20, 30])
+
+// Elasticsearch query generated:
+{
+  "terms": {
+    "brand.id": [10, 20, 30]
+  }
+}
+```
+This works because:
+
+Each product has exactly ONE brand.id
+Simple dot notation works: brand.id
+
+Categories Query (Nested)
+```php
+<?php
+
+// ❌ WRONG - This won't work correctly for nested arrays
+->whereIn('categories.id', [5, 15, 25])
+
+// ✅ CORRECT - Need nested query
+->whereNested('categories', fn($query) => $query->whereIn('id', [5, 15, 25]))
+
+// Elasticsearch query generated:
+{
+  "nested": {
+    "path": "categories",
+    "query": {
+      "terms": {
+        "id": [5, 15, 25]
+      }
+    }
+  }
+}
+```
+
+This is required because:
+
+Each product has MULTIPLE categories (array)
+Elasticsearch needs to know you're querying inside a nested array
+The nested query creates the proper context
+
+#### Schema Definition Comparison
+Looking at your Elasticsearch mapping:
+
+```php
+<?php
+
+// From StoreProduct2Searchable::createIndexSchema()
+
+'brand' => [
+    'type' => 'object',  // ← Single object
+    'properties' => [
+        "id" => ['type' => 'keyword'],
+        "name" => [...],
+        "slug" => [...]
+    ]
+],
+
+'categories' => [
+    'type' => 'nested',  // ← Array of nested objects
+    'properties' => [
+        "id" => ['type' => 'keyword'],
+        "title" => [...],
+        "slug" => [...],
+        "ancestor_ids" => [...],
+        "grandchildren" => [...]
+    ]
+]
+```
+
+
+```php
+
+// ✅ GOOD: Single nested query with multiple conditions
+->whenHasAny($allowed_category_ids ?? [], function($query, $categoryIds) {
+    $query->whereNested('categories', function($q) use ($categoryIds, $request) {
+        $q->whereIn('id', $categoryIds);
+        
+        // Add more conditions within the same nested query
+        if ($request->filled('category_status')) {
+            $q->where('status', $request->input('category_status'));
+        }
+    });
+})
+
+// ❌ AVOID: Multiple separate nested queries (less efficient)
+->whenHasAny($allowed_category_ids ?? [], function($query, $categoryIds) {
+    $query->whereNested('categories', fn($q) => $q->whereIn('id', $categoryIds));
+})
+->when($request->filled('category_status'), function($query) use ($request) {
+    $query->whereNested('categories', fn($q) => $q->where('status', $request->input('category_status')));
+})
+```
+
+```php
+<?php
+
+// Find products in specific categories with specific tags
+StoreProduct::search()
+    ->whereNested('categories', function($q) {
+        $q->whereIn('id', [5, 15, 25])
+          ->where('status', 'active');
+    })
+    ->whereNested('tags', function($q) {
+        $q->whereIn('id', [100, 200])
+          ->where('type', 'feature');
+    })
+    ->get();
+
+// This maintains the relationship within each nested object
+```
+
+## Visual Representation
+
+### Brand (Object) - One-to-One
+```
+Product → Brand
+   |        |
+   |        ├─ id: 10
+   |        ├─ name: "Apple"
+   |        └─ slug: "apple"
+   |
+   └─ Query: brand.id = 10 ✅ Simple!
+```
+
+### Categories (Nested) - One-to-Many
+```
+Product → Categories []
+   |        |
+   |        ├─ [0]
+   |        |   ├─ id: 5
+   |        |   ├─ title: "Electronics"
+   |        |   └─ slug: "electronics"
+   |        |
+   |        ├─ [1]
+   |        |   ├─ id: 15
+   |        |   ├─ title: "Mobile"
+   |        |   └─ slug: "mobile"
+   |        |
+   |        └─ [2]
+   |            ├─ id: 25
+   |            ├─ title: "Smartphones"
+   |            └─ slug: "smartphones"
+   |
+   └─ Query: Need nested context to search in array ⚠️
+```
+
+# Debug query
+```php
+
+
+$query = StoreProduct::search()
+    ->whenHasAny($allowed_category_ids ?? [], function($q, $categoryIds) {
+        $q->whereNested('categories', fn($query) => $query->whereIn('id', $categoryIds));
+    });
+
+// See the raw Elasticsearch query
+dd($query->toArray());
+
+// Or as JSON
+logger($query->toJson());
+
+
+/*
+ * This will output something like:
+ {
+  "query": {
+    "bool": {
+      "filter": [
+        {
+          "nested": {
+            "path": "categories",
+            "query": {
+              "bool": {
+                "filter": [
+                  {
+                    "terms": {
+                      "id": [1, 2, 3, 10, 15]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}*/
+```
+# search 
+
+###
+Basic Usage - Single Field
+
+```php
+
+use App\Models\StoreProduct;
+
+// Simple search on title field
+$results = StoreProduct::search()
+    ->where('store_id', 1)
+    ->where('state', 'published')
+    ->defaultSearch($request->input('q'), 'title')
+    ->orderByDesc('_score')
+    ->paginate(20);
+```
+### Search with Custom Boosts
+```php
+$results = StoreProduct::search()
+    ->where('store_id', 1)
+    ->defaultSearch($request->input('q'), 'title', [
+        'prefix_kw' => 15,              // Increase exact prefix match importance
+        'phrase_prefix_normalized' => 10,
+        'phrase_normalized' => 8,
+        'phrase_prefix_main' => 6,
+        'phrase_main' => 4,
+        'match_and_main' => 2,
+        'match_and_normalized' => 1,
+    ])
+    ->orderByDesc('_score')
+    ->orderByDesc('sale_count')
+    ->paginate(20);
+```
+###  Multi-Field Search
+```php
+<?php
+
+// Search across multiple fields
+$results = StoreProduct::search()
+    ->where('store_id', 1)
+    ->where('state', 'published')
+    ->defaultMultiSearch($request->input('q'), [
+        'title',
+        'brand.name',
+        'search_text'
+    ])
+    ->orderByDesc('_score')
+    ->paginate(20);
+```
+
+### search with filter
+```php
+<?php
+
+$searchTerm = $request->input('q');
+
+$results = StoreProduct::search()
+    ->where('store_id', 1)
+    ->where('state', 'published')
+    ->where('can_purchase', true)
+    
+    // Apply the sophisticated search
+    ->when($searchTerm, fn($q) => $q->defaultSearch($searchTerm, 'title'))
+    
+    // Additional filters
+    ->whenFilled('brand_id', fn($q, $brandId) => 
+        $q->whereIn('brand.id', (array) $brandId)
+    )
+    ->whenFilled('category_id', fn($q, $categoryId) => 
+        $q->whereNested('categories', fn($cq) => 
+            $cq->whereIn('id', (array) $categoryId)
+        )
+    )
+    ->whenFilled('min_price', fn($q, $minPrice) => 
+        $q->whereGreaterThanOrEqual('price', $minPrice)
+    )
+    
+    // Sort by relevance first, then by popularity
+    ->orderByDesc('_score')
+    ->orderByDesc('sale_count')
+    ->paginate(20);
+
+```
 ### 1. Create Your Model
 
 ```php
